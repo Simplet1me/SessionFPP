@@ -11,6 +11,7 @@
 #include "MinHook.h"
 #include "settings.h"
 #include "head_pose.h"
+#include "camera_smoothing.h"
 using RC::Unreal::UObject;
 namespace {
 FILE* logfile=nullptr;
@@ -20,6 +21,8 @@ using Tick=void(*)(void*,float);
 using SetTransform=void(*)(void*,const float*,const float*,bool,void*,unsigned char);
 Tick original=nullptr; SetTransform setTransform=nullptr; void* hook=nullptr;
 bool down=false,fault=false;
+CameraSmoothing smoothing;
+void* smoothingPawn=nullptr;void* smoothingComponent=nullptr;
 // Unique executable-section matches only. Ambiguous/updated builds fail closed.
 void* scan(const char* pattern) {
     std::vector<int> bytes; const char* p=pattern;
@@ -95,48 +98,53 @@ void restore(void* camera) {
             setTransform(saved.component,&p.x,&rot.x,false,nullptr,0);at<float>(saved.component,0x1f8)=saved.fov;}
     } saved={};
 }
-void frame(void* camera,float) {
+bool frame(void* camera,float dt) {
     bool held=(GetAsyncKeyState('G')&0x8000)!=0;
     if(focused()&&held&&!down){toggleFirstPerson();log(firstPersonEnabled()?"G: first person requested":"G: third person");}down=held;
     auto component=at<void*>(camera,0x228);
     if(saved.actor!=camera || saved.component!=component)saved={};
-    if(!firstPersonEnabled() || !focused()){state(firstPersonEnabled()?"WAIT: game window not focused":"VIEW: third person");restore(camera);return;}
+    if(!firstPersonEnabled() || !focused()){state(firstPersonEnabled()?"WAIT: game window not focused":"VIEW: third person");restore(camera);return false;}
     // Resolve possession each frame. FindFirstOf(SkaterCharacter) would select remote/replay actors.
     auto pc=RC::Unreal::UObjectGlobals::FindFirstOf(L"PlayerController");
-    if(!pc){state("WAIT: no PlayerController");restore(camera);return;}
+    if(!pc){state("WAIT: no PlayerController");restore(camera);return false;}
     // Same possession source as SessionOpenMP: AController::Pawn, confirmed by K2_GetPawn.
     // AcknowledgedPawn is network acknowledgement state, not the possession authority.
     auto pawn=at<UObject*>(pc,0x250);
-    if(!pawn || !component){state("WAIT: no possessed Pawn or camera component");restore(camera);return;}
+    if(!pawn || !component){state("WAIT: no possessed Pawn or camera component");restore(camera);return false;}
     auto local=pawn->GetFunctionByNameInChain(L"IsLocallyControlled");
-    if(!local || local->GetParmsSize()!=1){state("BLOCKED: IsLocallyControlled API unavailable");restore(camera);return;}
+    if(!local || local->GetParmsSize()!=1){state("BLOCKED: IsLocallyControlled API unavailable");restore(camera);return false;}
     bool ours=false;pawn->ProcessEvent(local,&ours);
-    if(!ours){state("WAIT: possessed Pawn is not locally controlled");restore(camera);return;}
+    if(!ours){state("WAIT: possessed Pawn is not locally controlled");restore(camera);return false;}
     // GetViewTarget is exposed by APlayerController. Do not look it up on PlayerCameraManager.
     auto getTarget=pc->GetFunctionByNameInChain(L"GetViewTarget");
     UObject* viewTarget=nullptr;
-    if(!getTarget || getTarget->GetParmsSize()!=sizeof(UObject*)){state("BLOCKED: PlayerController.GetViewTarget API unavailable");restore(camera);return;}
+    if(!getTarget || getTarget->GetParmsSize()!=sizeof(UObject*)){state("BLOCKED: PlayerController.GetViewTarget API unavailable");restore(camera);return false;}
     pc->ProcessEvent(getTarget,&viewTarget);
-    if(viewTarget!=reinterpret_cast<UObject*>(camera) && viewTarget!=pawn){state("WAIT: replay/editor or different camera owns the view target");restore(camera);return;}
-    if(at<unsigned char>(pawn,0x710)&2){state("WAIT: skater is ragdolling");restore(camera);return;}
+    if(viewTarget!=reinterpret_cast<UObject*>(camera) && viewTarget!=pawn){state("WAIT: replay/editor or different camera owns the view target");restore(camera);return false;}
+    if(at<unsigned char>(pawn,0x710)&2){state("WAIT: skater is ragdolling");restore(camera);return false;}
     Vec headPosition{};Quat headRotation{};
-    if(!headView(pawn,headPosition,headRotation)){state("WAIT: animated head bone pose unavailable");restore(camera);return;}
+    if(!headView(pawn,headPosition,headRotation)){state("WAIT: animated head bone pose unavailable");restore(camera);return false;}
     if(!saved.wrote){saved={component,camera,at<Vec>(component,0x11c),at<Vec>(component,0x128),at<float>(component,0x1f8),true};}
     // Fixed eye offsets in the head's own frame. All animated yaw, pitch and roll pass through.
     auto offset=rotate(headRotation,{cameraForward(),cameraSide(),cameraUp()});
     Vec position{headPosition.x+offset.x,headPosition.y+offset.y,headPosition.z+offset.z};
     // Post-multiply: the adjustment stays local to the animated head.
     auto rotation=mul(headRotation,fromRot({cameraPitch(),cameraYaw(),cameraRoll()}));
+    auto pawnRoot=at<void*>(pawn,0x130);
+    if(!pawnRoot){restore(camera);return false;}
+    if(smoothingPawn!=pawn||smoothingComponent!=component){smoothing.reset();smoothingPawn=pawn;smoothingComponent=component;}
+    smoothing.update(position,rotation,at<Vec>(pawnRoot,0x1d0),dt,cameraSmoothingEnabled(),cameraSmoothingMs());
     setTransform(component,&position.x,&rotation.x,false,nullptr,0);at<float>(component,0x1f8)=cameraFov();
     state("VIEW: first person following animated head bone");
+    return true;
 }
-void guardedFrame(void* camera,float dt){__try{frame(camera,dt);}__except(EXCEPTION_EXECUTE_HANDLER){fault=true;disableFirstPerson();log("Memory/API fault: first person disabled for this session");__try{restore(camera);}__except(EXCEPTION_EXECUTE_HANDLER){saved={};}}}
+void guardedFrame(void* camera,float dt){__try{if(!frame(camera,dt))smoothing.reset();}__except(EXCEPTION_EXECUTE_HANDLER){fault=true;smoothing.reset();disableFirstPerson();log("Memory/API fault: first person disabled for this session");__try{restore(camera);}__except(EXCEPTION_EXECUTE_HANDLER){saved={};}}}
 void beforeTick(void* self){__try{restore(self);}__except(EXCEPTION_EXECUTE_HANDLER){saved={};fault=true;log("Restore fault: first person disabled");}}
 void tick(void* self,float dt){beforeTick(self);original(self,dt);if(!fault)try{guardedFrame(self,dt);}catch(...){disableFirstPerson();log("C++ API error; view returned to third person");restore(self);}}
 }
 class FirstPerson final:public RC::CppUserModBase {
 public:
-    FirstPerson(){ModName=L"SessionFPP";ModVersion=L"0.2.0";ModDescription=L"G toggles first and third person";ModAuthors=L"SessionFPP";
+    FirstPerson(){ModName=L"SessionFPP";ModVersion=L"0.3.0";ModDescription=L"G toggles first and third person";ModAuthors=L"SessionFPP";
         wchar_t exe[32768]{};GetModuleFileNameW(nullptr,exe,32768);auto root=std::filesystem::path(exe).parent_path();logfile=_wfsopen((root/L"SessionFPP.log").c_str(),L"w",_SH_DENYNO);
         initializeSettings((root/L"SessionFPP.ini").c_str());
     }
@@ -149,7 +157,7 @@ public:
         auto status=MH_Initialize();if(status!=MH_OK&&status!=MH_ERROR_ALREADY_INITIALIZED){log("MinHook initialization failed");hook=nullptr;return;}
         if(MH_CreateHook(hook,reinterpret_cast<void*>(tick),reinterpret_cast<void**>(&original))!=MH_OK){log("Camera hook creation failed");hook=nullptr;return;}
         if(MH_EnableHook(hook)!=MH_OK){MH_RemoveHook(hook);hook=nullptr;log("Camera hook enable failed");return;}
-        log("SessionFPP 0.2.0 ready. Press G in gameplay. Default: third person.");
+        log("SessionFPP 0.3.0 ready. Press G in gameplay. Default: third person.");
     }
     ~FirstPerson() override {if(hook){MH_DisableHook(hook);MH_RemoveHook(hook);}if(logfile){fclose(logfile);logfile=nullptr;}}
 };

@@ -14,3 +14,6 @@ float cameraSide();
 float cameraPitch();
 float cameraYaw();
 float cameraRoll();
+
+bool cameraSmoothingEnabled();
+float cameraSmoothingMs();

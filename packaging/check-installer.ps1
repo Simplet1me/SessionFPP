@@ -2,7 +2,7 @@ $ErrorActionPreference='Stop'
 $root=Join-Path $PSScriptRoot '..\artifacts\installer-check'
 $root=[IO.Path]::GetFullPath($root)
 New-Item -ItemType Directory -Force $root | Out-Null
-$package=Join-Path $PSScriptRoot '..\release\0.2.0'
+$package=Join-Path $PSScriptRoot '..\release\0.3.0'
 function Assert($ok,$message){if(-not $ok){throw $message}}
 foreach($case in @('fresh','shared','nested')){
     $game=Join-Path $root $case
