@@ -1,4 +1,4 @@
-﻿#define PSAPI_VERSION 2
+#define PSAPI_VERSION 2
 #include <windows.h>
 #include <psapi.h>
 #include <algorithm>
@@ -15,9 +15,12 @@ std::wstring iniPath;
 struct Setting {const char* key;const wchar_t* iniKey;float value,initial,low,high;};
 Setting values[]={
     {"FOV",L"FOV",110,110,60,140},
-    {"EyeForwardCm",L"EyeForwardCm",18,18,0,40},
-    {"EyeUpCm",L"EyeUpCm",0,0,-30,30},
-    {"PitchDegrees",L"PitchDegrees",-10,-10,-60,40}
+    {"EyeForwardCm",L"EyeForwardCm",18,18,-100,100},
+    {"EyeSideCm",L"EyeSideCm",0,0,-100,100},
+    {"EyeUpCm",L"EyeUpCm",0,0,-100,100},
+    {"RotationPitchDeg",L"RotationPitchDeg",0,0,-180,180},
+    {"RotationYawDeg",L"RotationYawDeg",0,0,-180,180},
+    {"RotationRollDeg",L"RotationRollDeg",0,0,-180,180}
 };
 void save(){
     for(const auto& v:values){wchar_t text[32]{};swprintf_s(text,L"%.3f",v.value);if(!WritePrivateProfileStringW(L"Camera",v.iniKey,text,iniPath.c_str()))OutputDebugStringW(L"SessionFPP: failed to save camera setting\n");}
@@ -35,10 +38,13 @@ int get(const char* key,int* iv,float* fv,void*){
 const OmpPageItem2 rows[]={
     {OMP_ITEM_TOGGLE,"Enabled","First person","G toggles first and third person during gameplay.","Off","On",0,0,0},
     {OMP_ITEM_SLIDER,"FOV","Field of view (deg)","Horizontal field of view. Saved automatically.",nullptr,nullptr,60,140,1},
-    {OMP_ITEM_SLIDER,"EyeForwardCm","Eye forward (cm)","Move the camera ahead of the eye point to avoid face clipping.",nullptr,nullptr,0,40,1},
-    {OMP_ITEM_SLIDER,"EyeUpCm","Eye height offset (cm)","Move the eye point up or down.",nullptr,nullptr,-30,30,1},
-    {OMP_ITEM_SLIDER,"PitchDegrees","Pitch (deg)","Negative looks down; positive looks up.",nullptr,nullptr,-60,40,1},
-    {OMP_ITEM_ACTION,"Reset","Reset camera settings","Restore FOV 110, forward 18 cm, height 0 cm and pitch -10 degrees.",nullptr,nullptr,0,0,0}
+    {OMP_ITEM_SLIDER,"EyeForwardCm","Position X - forward (cm)","Head-local X offset; positive moves forward.",nullptr,nullptr,-100,100,1},
+    {OMP_ITEM_SLIDER,"EyeSideCm","Position Y - right (cm)","Head-local Y offset; positive moves right.",nullptr,nullptr,-100,100,1},
+    {OMP_ITEM_SLIDER,"EyeUpCm","Position Z - up (cm)","Head-local Z offset; positive moves up.",nullptr,nullptr,-100,100,1},
+    {OMP_ITEM_SLIDER,"RotationPitchDeg","Rotation Y - pitch (deg)","Local pitch offset; positive looks up.",nullptr,nullptr,-180,180,1},
+    {OMP_ITEM_SLIDER,"RotationYawDeg","Rotation Z - yaw (deg)","Local yaw offset; positive turns right.",nullptr,nullptr,-180,180,1},
+    {OMP_ITEM_SLIDER,"RotationRollDeg","Rotation X - roll (deg)","Local roll offset; positive tilts right.",nullptr,nullptr,-180,180,1},
+    {OMP_ITEM_ACTION,"Reset","Reset camera settings","Restore FOV 110, position (18, 0, 0) cm and zero rotation offsets.",nullptr,nullptr,0,0,0}
 };
 }
 void initializeSettings(const wchar_t* ini){
@@ -60,5 +66,9 @@ void toggleFirstPerson(){enabled=!enabled;}
 void disableFirstPerson(){enabled=false;}
 float cameraFov(){return values[0].value;}
 float cameraForward(){return values[1].value;}
-float cameraUp(){return values[2].value;}
-float cameraPitch(){return values[3].value;}
+float cameraSide(){return values[2].value;}
+float cameraUp(){return values[3].value;}
+float cameraPitch(){return values[4].value;}
+float cameraYaw(){return values[5].value;}
+float cameraRoll(){return values[6].value;}
+

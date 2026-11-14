@@ -1,53 +1,48 @@
-# SessionFPP
+# SessionFPP 0.2.0
 
-Session Skate Sim 原生 C++ 第一人称视角 mod，使用 UE4SS 3.0.1。
+Session Skate Sim 原生 C++ 第一人称视角 mod，使用 UE4SS 3.0.1。按 **G** 切换第一／第三人称，默认第三人称。
 
-关闭游戏，解压完整发行包，双击 Install.cmd。脚本自动查找 Steam 游戏目录，也可以指定：
+第一人称直接跟随人物动画后的头部骨骼位置和完整朝向。扭头、看前方、看脚下及侧倾由原生头部动画决定；不使用追尾相机朝向，不叠加自动俯仰或平滑。骨骼坐标轴通过参考姿态作固定对齐。
+
+关闭游戏，解压完整发行包，双击 Install.cmd。脚本自动查找 Steam 游戏目录。卸载运行 Uninstall.cmd。也可以指定游戏路径：
 
 ```powershell
 .\install.ps1 -GamePath 'F:\SteamLibrary\steamapps\common\Session'
 .\uninstall.ps1 -GamePath 'F:\SteamLibrary\steamapps\common\Session'
 ```
 
-进入游戏后按 G 切换第一/第三人称。默认第三人称，按住不连续切换。失焦和摔倒期间暂时恢复第三人称。相机编辑器使用独立视角目标时不覆盖它。
+脚本保留已有 UE4SS 和其他 mod。由本包安装的 UE4SS 仅在文件未修改且没有其他 mod 使用时卸载。日志和自定义配置保留。
 
-卸载：关闭游戏后双击 Uninstall.cmd。脚本只移除本包记录的文件；已有 UE4SS 和其他 mod 保留。本包安装的 UE4SS 只有在文件未修改、没有其他 mod 使用时才会移除。日志和自定义配置保留。
+## 游戏内设置
 
-可选：在游戏 SessionGame/Binaries/Win64 下新建 SessionFPP.ini：
+启用提供 OmpMenu_RegisterPage2 接口的 SessionOpenMP 后，打开原生暂停菜单的 SessionFPP 页面，可设置第一人称开关、视野、头部局部前移和高度偏移，以及恢复默认值。参数立即生效并自动保存。SessionOpenMP 不随本包附带；没有宿主时仍支持 G 键与 INI 配置。
+
+可在游戏 SessionGame/Binaries/Win64/SessionFPP.ini 调整：
 
 ```ini
 [Camera]
 FOV=110
 EyeForwardCm=18
+EyeSideCm=0
 EyeUpCm=0
-PitchDegrees=-10
+RotationPitchDeg=0
+RotationYawDeg=0
+RotationRollDeg=0
 ```
 
-EyeForwardCm 调整眼睛前方距离，EyeUpCm 调整高度，PitchDegrees 负数向下看。视角采用角色 GetActorEyesViewPoint 眼点与游戏相机水平朝向；不隐藏全身，可能需要按角色帽子/发型调整眼点以避免穿模。
+前移和高度偏移使用头部局部坐标，随头部一起旋转。旧版 PitchDegrees 不再读取，以确保观察方向完全来自头部动画。按角色发型、帽子调整眼点可减少穿模。本 mod 不隐藏头部模型。
 
-日志：SessionGame/Binaries/Win64/SessionFPP.log。游戏更新导致特征码失配时自动禁用，不使用旧地址强行加载。与其他修改相机的 mod 同时启用可能互相覆盖，应关闭它们的第一人称功能。
+失焦、摔倒和回放／编辑器占用其他视角时暂时恢复第三人称。日志位置为 Win64/SessionFPP.log，会记录骨骼解析、视角应用和阻止更新的原因。使用 head 或 amxx_head 骨骼，找不到时保留原生视角。游戏更新后特征码失配时自动禁用。
 
-构建：Visual Studio 2022 或更新版本的 x64 C++ 工具、CMake 3.21+；运行 packaging/build-native.cmd，再运行 powershell -File packaging/build-release.ps1。发行包包含源码和许可证。
+与其他修改相机的 mod 同时启用可能互相覆盖，应关闭它们的第一人称功能。
 
-本项目参考 SessionOpenMP 的 ASkaterCameraActor::Tick、USceneComponent::SetWorldLocationAndRotation 特征码、相机组件偏移和恢复流程；安装脚本改编自 SessionHistoryChallengeDisplay。遵循 GPL-3.0-or-later，含原运行时链接许可；MinHook、UE4SS 许可证随包提供。
+## 构建与验证
 
-验证范围：构建与隔离目录安装/卸载验证不等同于游戏实测。不同角色、地图、回放和游戏版本需在游戏内确认。
+需要 Visual Studio x64 C++ 工具、CMake 3.21+。运行 packaging/build-native.cmd，然后运行 powershell -File packaging/build-release.ps1。ctest --test-dir build/native --output-on-failure 运行配置和头部姿态测试。安装验证脚本为 packaging/check-installer.ps1。
 
-## 0.2.0 游戏内设置
+编译、自动化测试及离线安装验证不等于游戏实测；角色眼点、动画更新时序和不同地图仍需在游戏内确认。版本保持 0.2.0。
 
-安装并启用提供 OmpMenu_RegisterPage2 接口的 SessionOpenMP 后，打开游戏暂停菜单，进入 SessionFPP 页面：
+相机入口、骨骼布局、双缓冲姿态读取和名字转换参考 SessionOpenMP；安装脚本改编自 SessionHistoryChallengeDisplay。GPL-3.0-or-later，含 LICENSE-EXCEPTION.txt 中运行时链接许可。MinHook 和 UE4SS 许可证随包提供。
 
-- First person：第一人称开关，与 G 键同步；每次启动默认关闭。
-- Field of view (deg)：视野，60–140°。
-- Eye forward (cm)：眼点前移，0–40 cm。
-- Eye height offset (cm)：眼点高度偏移，-30–30 cm。
-- Pitch (deg)：俯仰角，-60–40°。
-- Reset camera settings：恢复默认参数。
 
-四个参数立即生效，并自动保存到游戏 Win64 目录的 SessionFPP.ini，下次启动读取。菜单使用游戏自带开关和滑块，不使用 F1 浮层。SessionOpenMP 不随本包附带；缺少菜单宿主时，G 键与 INI 配置仍可使用。两个 mod 加载顺序不限。
-
-## 0.2.0
-
-修复按 G 有切换日志但画面不变的问题：GetViewTarget 应在 Controller 上调用，旧版误从 PlayerCameraManager 查询，导致视角更新提前返回。已对照本机游戏 EXE 的反射函数注册表确认。角色读取改为参考 SessionOpenMP 的 AController::Pawn（0x250），并验证 IsLocallyControlled。
-
-SessionFPP.log 现在会记录 VIEW: first person applied 或 WAIT/BLOCKED 的具体原因。保留 0.2.0 版本号。此修复经过编译和离线验证，游戏画面仍需运行确认。
+??????? -100?100 cm?X ???Y ???Z ?????????? -180?180??Pitch ? Y ??Yaw ? Z ??Roll ? X ?????? 1?????????????????????????????????????? EyeForwardCm ? EyeUpCm ???????????? 0?

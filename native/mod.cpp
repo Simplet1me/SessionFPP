@@ -10,6 +10,7 @@
 #include "ue_access.h"
 #include "MinHook.h"
 #include "settings.h"
+#include "head_pose.h"
 using RC::Unreal::UObject;
 namespace {
 FILE* logfile=nullptr;
@@ -19,18 +20,6 @@ using Tick=void(*)(void*,float);
 using SetTransform=void(*)(void*,const float*,const float*,bool,void*,unsigned char);
 Tick original=nullptr; SetTransform setTransform=nullptr; void* hook=nullptr;
 bool down=false,fault=false;
-struct Vec {float x,y,z;};
-struct Quat {float x,y,z,w;};
-Vec rotate(Quat q,Vec v) {
-    Vec t{2*(q.y*v.z-q.z*v.y),2*(q.z*v.x-q.x*v.z),2*(q.x*v.y-q.y*v.x)};
-    return {v.x+q.w*t.x+q.y*t.z-q.z*t.y,v.y+q.w*t.y+q.z*t.x-q.x*t.z,v.z+q.w*t.z+q.x*t.y-q.y*t.x};
-}
-Quat mul(Quat a,Quat b) {return {a.w*b.x+a.x*b.w+a.y*b.z-a.z*b.y,a.w*b.y-a.x*b.z+a.y*b.w+a.z*b.x,a.w*b.z+a.x*b.y-a.y*b.x+a.z*b.w,a.w*b.w-a.x*b.x-a.y*b.y-a.z*b.z};}
-Quat fromRot(Vec r) {
-    const float k=3.14159265359f/360;
-    Quat yaw{0,0,sinf(r.y*k),cosf(r.y*k)},pitch{0,-sinf(r.x*k),0,cosf(r.x*k)},roll{-sinf(r.z*k),0,0,cosf(r.z*k)};
-    return mul(mul(yaw,pitch),roll);
-}
 // Unique executable-section matches only. Ambiguous/updated builds fail closed.
 void* scan(const char* pattern) {
     std::vector<int> bytes; const char* p=pattern;
@@ -44,6 +33,54 @@ void* scan(const char* pattern) {
         for(size_t i=0;i+bytes.size()<=size;++i){bool match=true;for(size_t j=0;j<bytes.size();++j)if(bytes[j]>=0&&start[i+j]!=bytes[j]){match=false;break;}
             if(match){if(result)return nullptr;result=start+i;}}
     } return result;
+}
+// Measured SessionOpenMP skeletal API: mesh +0x280, final ref skeleton at +0x1b0,
+// double-buffered component-space pose at +0x4b0, read buffer index +0x4f4.
+using NameToString=void(*)(const void*,void*);
+NameToString nameToString=nullptr;
+struct Transform {Quat rotation;Vec position;float pad;Vec scale;float pad2;};
+static_assert(sizeof(Transform)==48);
+struct BoneInfo {unsigned long long name;int parent;};
+// Ref bone info is packed to 12 bytes in UE4; access with byte strides below.
+struct Array {unsigned char* data;int count,capacity;};
+bool headView(UObject* pawn,Vec& position,Quat& rotation){
+    auto mesh=at<void*>(pawn,0x280);if(!mesh || !nameToString)return false;
+    auto skeleton=at<void*>(mesh,0x480);if(!skeleton)return false;
+    auto info=at<Array>(skeleton,0x1d0);auto reference=at<Array>(skeleton,0x1e0);
+    if(!info.data || !reference.data || info.count<=0 || info.count>512 || reference.count!=info.count)return false;
+    static void* lastMesh=nullptr;static void* lastSkeleton=nullptr;static int head=-1,count=0;static Quat correction{};
+    if(mesh!=lastMesh || skeleton!=lastSkeleton || count!=info.count){
+        lastMesh=mesh;lastSkeleton=skeleton;count=info.count;head=-1;
+        for(int i=0;i<count;++i){
+            // Supply a bounded reusable FString buffer; ordinary bone names fit without engine allocation.
+            wchar_t buffer[1024]{};struct String {wchar_t* data;int count,capacity;} name{buffer,0,1024};
+            nameToString(info.data+i*12,&name);
+            if(!name.data || name.count<=0 || name.count>1024)continue;
+            if(_wcsicmp(name.data,L"head")==0 || _wcsicmp(name.data,L"amxx_head")==0){head=i;break;}
+        }
+        if(head<0){log("No head/amxx_head bone found on current skeleton");return false;}
+        // Bone axes are rig axes, not camera axes. A CONSTANT reference-pose correction
+        // aligns them once; it never estimates animated look direction or cancels head turns.
+        Quat rest{0,0,0,1};int bone=head,depth=0;
+        while(bone>=0 && depth++<count){
+            if(bone>=count)return false;
+            auto q=reinterpret_cast<Transform*>(reference.data)[bone].rotation;if(!valid(q))return false;
+            rest=mul(q,rest);int parent=at<int>(info.data,bone*12+8);
+            if(parent>=bone)return false;bone=parent;
+        }
+        auto meshRelative=fromRot(at<Vec>(mesh,0x128));
+        correction=mul(inverse(rest),inverse(meshRelative));
+        log("Resolved animated head bone; camera follows position and complete rotation");
+    }
+    if(head<0)return false;
+    int read=at<int>(mesh,0x4f4);if(read!=0&&read!=1)return false;
+    auto pose=at<Array>(mesh,0x4b0+read*0x10);if(!pose.data||pose.count!=count)return false;
+    auto bone=reinterpret_cast<Transform*>(pose.data)[head];auto world=at<Transform>(mesh,0x1c0);
+    if(!valid(bone.rotation)||!valid(world.rotation))return false;
+    auto offset=rotate(world.rotation,{bone.position.x*world.scale.x,bone.position.y*world.scale.y,bone.position.z*world.scale.z});
+    position={world.position.x+offset.x,world.position.y+offset.y,world.position.z+offset.z};
+    rotation=mul(mul(world.rotation,bone.rotation),correction);
+    return valid(rotation)&&std::isfinite(position.x)&&std::isfinite(position.y)&&std::isfinite(position.z);
 }
 struct Saved {void* component=nullptr;void* actor=nullptr;Vec location{},rotation{};float fov=0;bool wrote=false;} saved;
 
@@ -82,19 +119,16 @@ void frame(void* camera,float) {
     pc->ProcessEvent(getTarget,&viewTarget);
     if(viewTarget!=reinterpret_cast<UObject*>(camera) && viewTarget!=pawn){state("WAIT: replay/editor or different camera owns the view target");restore(camera);return;}
     if(at<unsigned char>(pawn,0x710)&2){state("WAIT: skater is ragdolling");restore(camera);return;}
-    auto eyes=pawn->GetFunctionByNameInChain(L"GetActorEyesViewPoint");
-    if(!eyes || eyes->GetParmsSize()!=24){state("BLOCKED: Pawn.GetActorEyesViewPoint API unavailable");restore(camera);return;}
-    struct Eyes {Vec position;Vec rotation;} eye{};pawn->ProcessEvent(eyes,&eye);
-    if(!std::isfinite(eye.position.x)||!std::isfinite(eye.position.y)||!std::isfinite(eye.position.z)){restore(camera);return;}
+    Vec headPosition{};Quat headRotation{};
+    if(!headView(pawn,headPosition,headRotation)){state("WAIT: animated head bone pose unavailable");restore(camera);return;}
     if(!saved.wrote){saved={component,camera,at<Vec>(component,0x11c),at<Vec>(component,0x128),at<float>(component,0x1f8),true};}
-    auto root=at<void*>(camera,0x130);if(!root){state("BLOCKED: camera root missing");restore(camera);return;}
-    // Use the actor's freshly updated stock yaw, never last frame's overridden component rotation.
-    auto direction=rotate(at<Quat>(root,0x1c0),{1,0,0});
-    float yaw=atan2f(direction.y,direction.x)*57.2957795f;
-    auto rotation=fromRot({cameraPitch(),yaw,0});auto forward=rotate(rotation,{1,0,0});
-    Vec position{eye.position.x+forward.x*cameraForward(),eye.position.y+forward.y*cameraForward(),eye.position.z+forward.z*cameraForward()+cameraUp()};
+    // Fixed eye offsets in the head's own frame. All animated yaw, pitch and roll pass through.
+    auto offset=rotate(headRotation,{cameraForward(),cameraSide(),cameraUp()});
+    Vec position{headPosition.x+offset.x,headPosition.y+offset.y,headPosition.z+offset.z};
+    // Post-multiply: the adjustment stays local to the animated head.
+    auto rotation=mul(headRotation,fromRot({cameraPitch(),cameraYaw(),cameraRoll()}));
     setTransform(component,&position.x,&rotation.x,false,nullptr,0);at<float>(component,0x1f8)=cameraFov();
-    state("VIEW: first person applied");
+    state("VIEW: first person following animated head bone");
 }
 void guardedFrame(void* camera,float dt){__try{frame(camera,dt);}__except(EXCEPTION_EXECUTE_HANDLER){fault=true;disableFirstPerson();log("Memory/API fault: first person disabled for this session");__try{restore(camera);}__except(EXCEPTION_EXECUTE_HANDLER){saved={};}}}
 void beforeTick(void* self){__try{restore(self);}__except(EXCEPTION_EXECUTE_HANDLER){saved={};fault=true;log("Restore fault: first person disabled");}}
@@ -110,7 +144,8 @@ public:
     void on_unreal_init() override {
         hook=scan("40 55 57 48 8D AC 24 18 FC FF FF 48 81 EC E8 04 00 00 44 0F 29 8C 24 80 04 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 60 03 00 00");
         setTransform=reinterpret_cast<SetTransform>(scan("4C 8B DC 53 55 56 57 41 56 48 81 EC C0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 80 00 00 00"));
-        if(!hook||!setTransform){log("Unsupported game build: camera signatures missing or ambiguous; no hooks installed");hook=nullptr;return;}
+        nameToString=reinterpret_cast<NameToString>(scan("48 89 5C 24 18 48 89 74 24 20 57 48 83 EC 30 8B 01 48 8B F1 8B F8 48 8B DA C1 EF 10 83 79 04 00"));
+        if(!hook||!setTransform||!nameToString){log("Unsupported game build: camera signatures missing or ambiguous; no hooks installed");hook=nullptr;return;}
         auto status=MH_Initialize();if(status!=MH_OK&&status!=MH_ERROR_ALREADY_INITIALIZED){log("MinHook initialization failed");hook=nullptr;return;}
         if(MH_CreateHook(hook,reinterpret_cast<void*>(tick),reinterpret_cast<void**>(&original))!=MH_OK){log("Camera hook creation failed");hook=nullptr;return;}
         if(MH_EnableHook(hook)!=MH_OK){MH_RemoveHook(hook);hook=nullptr;log("Camera hook enable failed");return;}
