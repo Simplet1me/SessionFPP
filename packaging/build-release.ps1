@@ -1,4 +1,4 @@
-param([string]$Version='0.3.0',[switch]$Rebuild)
+param([string]$Version='0.3.1',[switch]$Rebuild)
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Invalid release version.'}
 $root=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))

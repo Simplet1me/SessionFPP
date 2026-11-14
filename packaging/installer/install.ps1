@@ -93,5 +93,5 @@ try {
     throw
 }
 Write-Output "Installed SessionFPP $($manifest.Version) to $modDir"
-Write-Output 'G: toggle first/third person.'
+Write-Output 'G / controller RB: toggle first/third person.'
 if($owned){Write-Output 'UE4SS ownership recorded. Uninstall removes it only if no other mods use it and its files are unchanged.'}

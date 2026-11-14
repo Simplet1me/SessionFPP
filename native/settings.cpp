@@ -40,7 +40,7 @@ int get(const char* key,int* iv,float* fv,void*){
     return 0;
 }
 const OmpPageItem2 rows[]={
-    {OMP_ITEM_TOGGLE,"Enabled","First person","G toggles first and third person during gameplay.","Off","On",0,0,0},
+    {OMP_ITEM_TOGGLE,"Enabled","First person","G or controller RB toggles first and third person during gameplay.","Off","On",0,0,0},
     {OMP_ITEM_SLIDER,"FOV","Field of view (deg)","Horizontal field of view. Saved automatically.",nullptr,nullptr,60,140,1},
     {OMP_ITEM_SLIDER,"EyeForwardCm","Position X - forward (cm)","Head-local X offset; positive moves forward.",nullptr,nullptr,-100,100,1},
     {OMP_ITEM_SLIDER,"EyeSideCm","Position Y - right (cm)","Head-local Y offset; positive moves right.",nullptr,nullptr,-100,100,1},

@@ -1,5 +1,6 @@
 // Based on the verified SessionOpenMP camera API. GPL-3.0-or-later.
 #include <windows.h>
+#include <Xinput.h>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -100,7 +101,16 @@ void restore(void* camera) {
 }
 bool frame(void* camera,float dt) {
     bool held=(GetAsyncKeyState('G')&0x8000)!=0;
-    if(focused()&&held&&!down){toggleFirstPerson();log(firstPersonEnabled()?"G: first person requested":"G: third person");}down=held;
+    // Aggregate keyboard and all XInput slots into a single rising edge.
+    // Disconnected slots are retried once a second, supporting hot-plug without busy polling.
+    static ULONGLONG retry[XUSER_MAX_COUNT]{};const auto now=GetTickCount64();
+    for(DWORD user=0;user<XUSER_MAX_COUNT;++user){
+        if(now<retry[user])continue;
+        XINPUT_STATE pad{};
+        if(XInputGetState(user,&pad)==ERROR_SUCCESS){retry[user]=0;held=held || (pad.Gamepad.wButtons&XINPUT_GAMEPAD_RIGHT_SHOULDER)!=0;}
+        else retry[user]=now+1000;
+    }
+    if(focused()&&held&&!down){toggleFirstPerson();log(firstPersonEnabled()?"G/RB: first person requested":"G/RB: third person");}down=held;
     auto component=at<void*>(camera,0x228);
     if(saved.actor!=camera || saved.component!=component)saved={};
     if(!firstPersonEnabled() || !focused()){state(firstPersonEnabled()?"WAIT: game window not focused":"VIEW: third person");restore(camera);return false;}
@@ -144,7 +154,7 @@ void tick(void* self,float dt){beforeTick(self);original(self,dt);if(!fault)try{
 }
 class FirstPerson final:public RC::CppUserModBase {
 public:
-    FirstPerson(){ModName=L"SessionFPP";ModVersion=L"0.3.0";ModDescription=L"G toggles first and third person";ModAuthors=L"SessionFPP";
+    FirstPerson(){ModName=L"SessionFPP";ModVersion=L"0.3.1";ModDescription=L"G or controller RB toggles first and third person";ModAuthors=L"SessionFPP";
         wchar_t exe[32768]{};GetModuleFileNameW(nullptr,exe,32768);auto root=std::filesystem::path(exe).parent_path();logfile=_wfsopen((root/L"SessionFPP.log").c_str(),L"w",_SH_DENYNO);
         initializeSettings((root/L"SessionFPP.ini").c_str());
     }
@@ -157,7 +167,7 @@ public:
         auto status=MH_Initialize();if(status!=MH_OK&&status!=MH_ERROR_ALREADY_INITIALIZED){log("MinHook initialization failed");hook=nullptr;return;}
         if(MH_CreateHook(hook,reinterpret_cast<void*>(tick),reinterpret_cast<void**>(&original))!=MH_OK){log("Camera hook creation failed");hook=nullptr;return;}
         if(MH_EnableHook(hook)!=MH_OK){MH_RemoveHook(hook);hook=nullptr;log("Camera hook enable failed");return;}
-        log("SessionFPP 0.3.0 ready. Press G in gameplay. Default: third person.");
+        log("SessionFPP 0.3.1 ready. Press G or controller RB in gameplay. Default: third person.");
     }
     ~FirstPerson() override {if(hook){MH_DisableHook(hook);MH_RemoveHook(hook);}if(logfile){fclose(logfile);logfile=nullptr;}}
 };
