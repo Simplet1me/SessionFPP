@@ -45,3 +45,9 @@ EyeForwardCm 调整眼睛前方距离，EyeUpCm 调整高度，PitchDegrees 负�
 - Reset camera settings：恢复默认参数。
 
 四个参数立即生效，并自动保存到游戏 Win64 目录的 SessionFPP.ini，下次启动读取。菜单使用游戏自带开关和滑块，不使用 F1 浮层。SessionOpenMP 不随本包附带；缺少菜单宿主时，G 键与 INI 配置仍可使用。两个 mod 加载顺序不限。
+
+## 0.2.0
+
+修复按 G 有切换日志但画面不变的问题：GetViewTarget 应在 Controller 上调用，旧版误从 PlayerCameraManager 查询，导致视角更新提前返回。已对照本机游戏 EXE 的反射函数注册表确认。角色读取改为参考 SessionOpenMP 的 AController::Pawn（0x250），并验证 IsLocallyControlled。
+
+SessionFPP.log 现在会记录 VIEW: first person applied 或 WAIT/BLOCKED 的具体原因。保留 0.2.0 版本号。此修复经过编译和离线验证，游戏画面仍需运行确认。

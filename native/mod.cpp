@@ -47,7 +47,8 @@ void* scan(const char* pattern) {
 }
 struct Saved {void* component=nullptr;void* actor=nullptr;Vec location{},rotation{};float fov=0;bool wrote=false;} saved;
 
-UObject* objectProperty(UObject* o,const wchar_t* name){auto p=o?o->GetValuePtrByPropertyNameInChain(name):nullptr;return p?*static_cast<UObject**>(p):nullptr;}
+// Log transitions only, so a failed guard is visible without per-frame log spam.
+void state(const char* message) {static std::string previous;if(previous!=message){log(message);previous=message;}}
 bool focused(){DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);return pid==GetCurrentProcessId();}
 void restore(void* camera) {
     if(!saved.wrote)return;
@@ -62,30 +63,38 @@ void frame(void* camera,float) {
     if(focused()&&held&&!down){toggleFirstPerson();log(firstPersonEnabled()?"G: first person requested":"G: third person");}down=held;
     auto component=at<void*>(camera,0x228);
     if(saved.actor!=camera || saved.component!=component)saved={};
-    if(!firstPersonEnabled() || !focused()){restore(camera);return;}
+    if(!firstPersonEnabled() || !focused()){state(firstPersonEnabled()?"WAIT: game window not focused":"VIEW: third person");restore(camera);return;}
     // Resolve possession each frame. FindFirstOf(SkaterCharacter) would select remote/replay actors.
     auto pc=RC::Unreal::UObjectGlobals::FindFirstOf(L"PlayerController");
-    auto pawn=objectProperty(pc,L"AcknowledgedPawn");
-    auto target=objectProperty(pc,L"PlayerCameraManager");
-    if(!pawn || !target || !component){restore(camera);return;}
-    auto getTarget=target->GetFunctionByNameInChain(L"GetViewTarget");
+    if(!pc){state("WAIT: no PlayerController");restore(camera);return;}
+    // Same possession source as SessionOpenMP: AController::Pawn, confirmed by K2_GetPawn.
+    // AcknowledgedPawn is network acknowledgement state, not the possession authority.
+    auto pawn=at<UObject*>(pc,0x250);
+    if(!pawn || !component){state("WAIT: no possessed Pawn or camera component");restore(camera);return;}
+    auto local=pawn->GetFunctionByNameInChain(L"IsLocallyControlled");
+    if(!local || local->GetParmsSize()!=1){state("BLOCKED: IsLocallyControlled API unavailable");restore(camera);return;}
+    bool ours=false;pawn->ProcessEvent(local,&ours);
+    if(!ours){state("WAIT: possessed Pawn is not locally controlled");restore(camera);return;}
+    // GetViewTarget is exposed by APlayerController. Do not look it up on PlayerCameraManager.
+    auto getTarget=pc->GetFunctionByNameInChain(L"GetViewTarget");
     UObject* viewTarget=nullptr;
-    if(!getTarget || getTarget->GetParmsSize()!=sizeof(UObject*)){restore(camera);return;}target->ProcessEvent(getTarget,&viewTarget);
-    // Replay/editor cameras have their own view target and must retain control.
-    if(viewTarget!=reinterpret_cast<UObject*>(camera) && viewTarget!=pawn){restore(camera);return;}
-    if(at<unsigned char>(pawn,0x710)&2){restore(camera);return;}
+    if(!getTarget || getTarget->GetParmsSize()!=sizeof(UObject*)){state("BLOCKED: PlayerController.GetViewTarget API unavailable");restore(camera);return;}
+    pc->ProcessEvent(getTarget,&viewTarget);
+    if(viewTarget!=reinterpret_cast<UObject*>(camera) && viewTarget!=pawn){state("WAIT: replay/editor or different camera owns the view target");restore(camera);return;}
+    if(at<unsigned char>(pawn,0x710)&2){state("WAIT: skater is ragdolling");restore(camera);return;}
     auto eyes=pawn->GetFunctionByNameInChain(L"GetActorEyesViewPoint");
-    if(!eyes || eyes->GetParmsSize()!=24){restore(camera);return;}
+    if(!eyes || eyes->GetParmsSize()!=24){state("BLOCKED: Pawn.GetActorEyesViewPoint API unavailable");restore(camera);return;}
     struct Eyes {Vec position;Vec rotation;} eye{};pawn->ProcessEvent(eyes,&eye);
     if(!std::isfinite(eye.position.x)||!std::isfinite(eye.position.y)||!std::isfinite(eye.position.z)){restore(camera);return;}
     if(!saved.wrote){saved={component,camera,at<Vec>(component,0x11c),at<Vec>(component,0x128),at<float>(component,0x1f8),true};}
-    auto root=at<void*>(camera,0x130);if(!root){restore(camera);return;}
+    auto root=at<void*>(camera,0x130);if(!root){state("BLOCKED: camera root missing");restore(camera);return;}
     // Use the actor's freshly updated stock yaw, never last frame's overridden component rotation.
     auto direction=rotate(at<Quat>(root,0x1c0),{1,0,0});
     float yaw=atan2f(direction.y,direction.x)*57.2957795f;
     auto rotation=fromRot({cameraPitch(),yaw,0});auto forward=rotate(rotation,{1,0,0});
     Vec position{eye.position.x+forward.x*cameraForward(),eye.position.y+forward.y*cameraForward(),eye.position.z+forward.z*cameraForward()+cameraUp()};
     setTransform(component,&position.x,&rotation.x,false,nullptr,0);at<float>(component,0x1f8)=cameraFov();
+    state("VIEW: first person applied");
 }
 void guardedFrame(void* camera,float dt){__try{frame(camera,dt);}__except(EXCEPTION_EXECUTE_HANDLER){fault=true;disableFirstPerson();log("Memory/API fault: first person disabled for this session");__try{restore(camera);}__except(EXCEPTION_EXECUTE_HANDLER){saved={};}}}
 void beforeTick(void* self){__try{restore(self);}__except(EXCEPTION_EXECUTE_HANDLER){saved={};fault=true;log("Restore fault: first person disabled");}}
