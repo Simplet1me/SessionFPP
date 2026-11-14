@@ -1,0 +1,113 @@
+// Based on the verified SessionOpenMP camera API. GPL-3.0-or-later.
+#include <windows.h>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+#include <string>
+#include <filesystem>
+#include <share.h>
+#include "ue_access.h"
+#include "MinHook.h"
+using RC::Unreal::UObject;
+namespace {
+FILE* logfile=nullptr;
+void log(const char* s) {if(logfile){fprintf(logfile,"%s\n",s);fflush(logfile);}}
+template<class T> T& at(void* p,size_t off) {return *reinterpret_cast<T*>(static_cast<unsigned char*>(p)+off);}
+using Tick=void(*)(void*,float);
+using SetTransform=void(*)(void*,const float*,const float*,bool,void*,unsigned char);
+Tick original=nullptr; SetTransform setTransform=nullptr; void* hook=nullptr;
+bool enabled=false,down=false,fault=false;
+struct Vec {float x,y,z;};
+struct Quat {float x,y,z,w;};
+Vec rotate(Quat q,Vec v) {
+    Vec t{2*(q.y*v.z-q.z*v.y),2*(q.z*v.x-q.x*v.z),2*(q.x*v.y-q.y*v.x)};
+    return {v.x+q.w*t.x+q.y*t.z-q.z*t.y,v.y+q.w*t.y+q.z*t.x-q.x*t.z,v.z+q.w*t.z+q.x*t.y-q.y*t.x};
+}
+Quat mul(Quat a,Quat b) {return {a.w*b.x+a.x*b.w+a.y*b.z-a.z*b.y,a.w*b.y-a.x*b.z+a.y*b.w+a.z*b.x,a.w*b.z+a.x*b.y-a.y*b.x+a.z*b.w,a.w*b.w-a.x*b.x-a.y*b.y-a.z*b.z};}
+Quat fromRot(Vec r) {
+    const float k=3.14159265359f/360;
+    Quat yaw{0,0,sinf(r.y*k),cosf(r.y*k)},pitch{0,-sinf(r.x*k),0,cosf(r.x*k)},roll{-sinf(r.z*k),0,0,cosf(r.z*k)};
+    return mul(mul(yaw,pitch),roll);
+}
+// Unique executable-section matches only. Ambiguous/updated builds fail closed.
+void* scan(const char* pattern) {
+    std::vector<int> bytes; const char* p=pattern;
+    while(*p){if(*p==' '){++p;continue;} if(*p=='?'){bytes.push_back(-1);while(*p=='?')++p;}else{char* end=nullptr;bytes.push_back(static_cast<int>(strtoul(p,&end,16)));p=end;}}
+    auto base=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
+    auto nt=reinterpret_cast<IMAGE_NT_HEADERS*>(base+reinterpret_cast<IMAGE_DOS_HEADER*>(base)->e_lfanew);
+    auto sections=IMAGE_FIRST_SECTION(nt); void* result=nullptr;
+    for(unsigned s=0;s<nt->FileHeader.NumberOfSections;++s){
+        if(!(sections[s].Characteristics&IMAGE_SCN_MEM_EXECUTE))continue;
+        auto start=base+sections[s].VirtualAddress; size_t size=sections[s].Misc.VirtualSize;
+        for(size_t i=0;i+bytes.size()<=size;++i){bool match=true;for(size_t j=0;j<bytes.size();++j)if(bytes[j]>=0&&start[i+j]!=bytes[j]){match=false;break;}
+            if(match){if(result)return nullptr;result=start+i;}}
+    } return result;
+}
+struct Saved {void* component=nullptr;void* actor=nullptr;Vec location{},rotation{};float fov=0;bool wrote=false;} saved;
+float fov=110,eyeForward=18,eyeUp=0,pitchOffset=-10;
+UObject* objectProperty(UObject* o,const wchar_t* name){auto p=o?o->GetValuePtrByPropertyNameInChain(name):nullptr;return p?*static_cast<UObject**>(p):nullptr;}
+bool focused(){DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);return pid==GetCurrentProcessId();}
+void restore(void* camera) {
+    if(!saved.wrote)return;
+    // Called only on the currently ticking camera; never dereference a cached actor after travel.
+    if(saved.actor==camera && at<void*>(camera,0x228)==saved.component){
+        auto root=at<void*>(camera,0x130);if(root){auto q=at<Quat>(root,0x1c0);auto pos=at<Vec>(root,0x1d0);auto off=rotate(q,saved.location);Vec p{pos.x+off.x,pos.y+off.y,pos.z+off.z};auto rot=mul(q,fromRot(saved.rotation));
+            setTransform(saved.component,&p.x,&rot.x,false,nullptr,0);at<float>(saved.component,0x1f8)=saved.fov;}
+    } saved={};
+}
+void frame(void* camera,float) {
+    bool held=(GetAsyncKeyState('Y')&0x8000)!=0;
+    if(focused()&&held&&!down){enabled=!enabled;log(enabled?"Y: first person requested":"Y: third person");}down=held;
+    auto component=at<void*>(camera,0x228);
+    if(saved.actor!=camera || saved.component!=component)saved={};
+    if(!enabled || !focused()){restore(camera);return;}
+    // Resolve possession each frame. FindFirstOf(SkaterCharacter) would select remote/replay actors.
+    auto pc=RC::Unreal::UObjectGlobals::FindFirstOf(L"PlayerController");
+    auto pawn=objectProperty(pc,L"AcknowledgedPawn");
+    auto target=objectProperty(pc,L"PlayerCameraManager");
+    if(!pawn || !target || !component){restore(camera);return;}
+    auto getTarget=target->GetFunctionByNameInChain(L"GetViewTarget");
+    UObject* viewTarget=nullptr;
+    if(!getTarget || getTarget->GetParmsSize()!=sizeof(UObject*)){restore(camera);return;}target->ProcessEvent(getTarget,&viewTarget);
+    // Replay/editor cameras have their own view target and must retain control.
+    if(viewTarget!=reinterpret_cast<UObject*>(camera) && viewTarget!=pawn){restore(camera);return;}
+    if(at<unsigned char>(pawn,0x710)&2){restore(camera);return;}
+    auto eyes=pawn->GetFunctionByNameInChain(L"GetActorEyesViewPoint");
+    if(!eyes || eyes->GetParmsSize()!=24){restore(camera);return;}
+    struct Eyes {Vec position;Vec rotation;} eye{};pawn->ProcessEvent(eyes,&eye);
+    if(!std::isfinite(eye.position.x)||!std::isfinite(eye.position.y)||!std::isfinite(eye.position.z)){restore(camera);return;}
+    if(!saved.wrote){saved={component,camera,at<Vec>(component,0x11c),at<Vec>(component,0x128),at<float>(component,0x1f8),true};}
+    auto root=at<void*>(camera,0x130);if(!root){restore(camera);return;}
+    // Use the actor's freshly updated stock yaw, never last frame's overridden component rotation.
+    auto direction=rotate(at<Quat>(root,0x1c0),{1,0,0});
+    float yaw=atan2f(direction.y,direction.x)*57.2957795f;
+    auto rotation=fromRot({pitchOffset,yaw,0});auto forward=rotate(rotation,{1,0,0});
+    Vec position{eye.position.x+forward.x*eyeForward,eye.position.y+forward.y*eyeForward,eye.position.z+forward.z*eyeForward+eyeUp};
+    setTransform(component,&position.x,&rotation.x,false,nullptr,0);at<float>(component,0x1f8)=fov;
+}
+void guardedFrame(void* camera,float dt){__try{frame(camera,dt);}__except(EXCEPTION_EXECUTE_HANDLER){fault=true;enabled=false;log("Memory/API fault: first person disabled for this session");__try{restore(camera);}__except(EXCEPTION_EXECUTE_HANDLER){saved={};}}}
+void beforeTick(void* self){__try{restore(self);}__except(EXCEPTION_EXECUTE_HANDLER){saved={};fault=true;log("Restore fault: first person disabled");}}
+void tick(void* self,float dt){beforeTick(self);original(self,dt);if(!fault)try{guardedFrame(self,dt);}catch(...){enabled=false;log("C++ API error; view returned to third person");restore(self);}}
+}
+class FirstPerson final:public RC::CppUserModBase {
+public:
+    FirstPerson(){ModName=L"SessionFPP";ModVersion=L"1.0.0";ModDescription=L"Y toggles first and third person";ModAuthors=L"SessionFPP";
+        wchar_t exe[32768]{};GetModuleFileNameW(nullptr,exe,32768);auto root=std::filesystem::path(exe).parent_path();logfile=_wfsopen((root/L"SessionFPP.log").c_str(),L"w",_SH_DENYNO);
+        auto ini=root/L"SessionFPP.ini";
+        auto read=[&](const wchar_t* name,float value,float low,float high){wchar_t buffer[64]{};auto def=std::to_wstring(value);GetPrivateProfileStringW(L"Camera",name,def.c_str(),buffer,64,ini.c_str());float n=static_cast<float>(_wtof(buffer));return std::isfinite(n)&&n>=low&&n<=high?n:value;};
+        fov=read(L"FOV",110,60,140);eyeForward=read(L"EyeForwardCm",18,0,40);eyeUp=read(L"EyeUpCm",0,-30,30);pitchOffset=read(L"PitchDegrees",-10,-60,40);
+    }
+    void on_unreal_init() override {
+        hook=scan("40 55 57 48 8D AC 24 18 FC FF FF 48 81 EC E8 04 00 00 44 0F 29 8C 24 80 04 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 60 03 00 00");
+        setTransform=reinterpret_cast<SetTransform>(scan("4C 8B DC 53 55 56 57 41 56 48 81 EC C0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 80 00 00 00"));
+        if(!hook||!setTransform){log("Unsupported game build: camera signatures missing or ambiguous; no hooks installed");hook=nullptr;return;}
+        auto status=MH_Initialize();if(status!=MH_OK&&status!=MH_ERROR_ALREADY_INITIALIZED){log("MinHook initialization failed");hook=nullptr;return;}
+        if(MH_CreateHook(hook,reinterpret_cast<void*>(tick),reinterpret_cast<void**>(&original))!=MH_OK){log("Camera hook creation failed");hook=nullptr;return;}
+        if(MH_EnableHook(hook)!=MH_OK){MH_RemoveHook(hook);hook=nullptr;log("Camera hook enable failed");return;}
+        log("SessionFPP 1.0.0 ready. Press Y in gameplay. Default: third person.");
+    }
+    ~FirstPerson() override {if(hook){MH_DisableHook(hook);MH_RemoveHook(hook);}if(logfile){fclose(logfile);logfile=nullptr;}}
+};
+extern "C" __declspec(dllexport) RC::CppUserModBase* start_mod(){return new FirstPerson();}
+extern "C" __declspec(dllexport) void uninstall_mod(RC::CppUserModBase* mod){delete mod;}

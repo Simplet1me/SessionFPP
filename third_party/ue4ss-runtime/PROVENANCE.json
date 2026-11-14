@@ -1,0 +1,10 @@
+{
+  "version": "UE4SS 3.0.1 (tested installed build)",
+  "upstream": "https://github.com/UE4SS-RE/RE-UE4SS",
+  "source": "Read-only copy of the locally installed, game-tested UE4SS runtime; no other mod files included.",
+  "files": {
+    "dwmapi.dll": "ce596412befa68c30b7f88f65beb77d9bdad55e9b96a276a5a9cf690c63f24bb",
+    "UE4SS-settings.ini": "a370e6a789b462a6fc529448b2cb3b657558767168e1821f27704e3e5a0808c7",
+    "UE4SS.dll": "8ac18fbffc1ef96b0662d4a2d537b3f224c26d65caaba7989a9404c566102b26"
+  }
+}
