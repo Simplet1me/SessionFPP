@@ -9,6 +9,7 @@
 #include <share.h>
 #include "ue_access.h"
 #include "MinHook.h"
+#include "settings.h"
 using RC::Unreal::UObject;
 namespace {
 FILE* logfile=nullptr;
@@ -17,7 +18,7 @@ template<class T> T& at(void* p,size_t off) {return *reinterpret_cast<T*>(static
 using Tick=void(*)(void*,float);
 using SetTransform=void(*)(void*,const float*,const float*,bool,void*,unsigned char);
 Tick original=nullptr; SetTransform setTransform=nullptr; void* hook=nullptr;
-bool enabled=false,down=false,fault=false;
+bool down=false,fault=false;
 struct Vec {float x,y,z;};
 struct Quat {float x,y,z,w;};
 Vec rotate(Quat q,Vec v) {
@@ -45,7 +46,7 @@ void* scan(const char* pattern) {
     } return result;
 }
 struct Saved {void* component=nullptr;void* actor=nullptr;Vec location{},rotation{};float fov=0;bool wrote=false;} saved;
-float fov=110,eyeForward=18,eyeUp=0,pitchOffset=-10;
+
 UObject* objectProperty(UObject* o,const wchar_t* name){auto p=o?o->GetValuePtrByPropertyNameInChain(name):nullptr;return p?*static_cast<UObject**>(p):nullptr;}
 bool focused(){DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);return pid==GetCurrentProcessId();}
 void restore(void* camera) {
@@ -57,11 +58,11 @@ void restore(void* camera) {
     } saved={};
 }
 void frame(void* camera,float) {
-    bool held=(GetAsyncKeyState('Y')&0x8000)!=0;
-    if(focused()&&held&&!down){enabled=!enabled;log(enabled?"Y: first person requested":"Y: third person");}down=held;
+    bool held=(GetAsyncKeyState('G')&0x8000)!=0;
+    if(focused()&&held&&!down){toggleFirstPerson();log(firstPersonEnabled()?"G: first person requested":"G: third person");}down=held;
     auto component=at<void*>(camera,0x228);
     if(saved.actor!=camera || saved.component!=component)saved={};
-    if(!enabled || !focused()){restore(camera);return;}
+    if(!firstPersonEnabled() || !focused()){restore(camera);return;}
     // Resolve possession each frame. FindFirstOf(SkaterCharacter) would select remote/replay actors.
     auto pc=RC::Unreal::UObjectGlobals::FindFirstOf(L"PlayerController");
     auto pawn=objectProperty(pc,L"AcknowledgedPawn");
@@ -82,22 +83,21 @@ void frame(void* camera,float) {
     // Use the actor's freshly updated stock yaw, never last frame's overridden component rotation.
     auto direction=rotate(at<Quat>(root,0x1c0),{1,0,0});
     float yaw=atan2f(direction.y,direction.x)*57.2957795f;
-    auto rotation=fromRot({pitchOffset,yaw,0});auto forward=rotate(rotation,{1,0,0});
-    Vec position{eye.position.x+forward.x*eyeForward,eye.position.y+forward.y*eyeForward,eye.position.z+forward.z*eyeForward+eyeUp};
-    setTransform(component,&position.x,&rotation.x,false,nullptr,0);at<float>(component,0x1f8)=fov;
+    auto rotation=fromRot({cameraPitch(),yaw,0});auto forward=rotate(rotation,{1,0,0});
+    Vec position{eye.position.x+forward.x*cameraForward(),eye.position.y+forward.y*cameraForward(),eye.position.z+forward.z*cameraForward()+cameraUp()};
+    setTransform(component,&position.x,&rotation.x,false,nullptr,0);at<float>(component,0x1f8)=cameraFov();
 }
-void guardedFrame(void* camera,float dt){__try{frame(camera,dt);}__except(EXCEPTION_EXECUTE_HANDLER){fault=true;enabled=false;log("Memory/API fault: first person disabled for this session");__try{restore(camera);}__except(EXCEPTION_EXECUTE_HANDLER){saved={};}}}
+void guardedFrame(void* camera,float dt){__try{frame(camera,dt);}__except(EXCEPTION_EXECUTE_HANDLER){fault=true;disableFirstPerson();log("Memory/API fault: first person disabled for this session");__try{restore(camera);}__except(EXCEPTION_EXECUTE_HANDLER){saved={};}}}
 void beforeTick(void* self){__try{restore(self);}__except(EXCEPTION_EXECUTE_HANDLER){saved={};fault=true;log("Restore fault: first person disabled");}}
-void tick(void* self,float dt){beforeTick(self);original(self,dt);if(!fault)try{guardedFrame(self,dt);}catch(...){enabled=false;log("C++ API error; view returned to third person");restore(self);}}
+void tick(void* self,float dt){beforeTick(self);original(self,dt);if(!fault)try{guardedFrame(self,dt);}catch(...){disableFirstPerson();log("C++ API error; view returned to third person");restore(self);}}
 }
 class FirstPerson final:public RC::CppUserModBase {
 public:
-    FirstPerson(){ModName=L"SessionFPP";ModVersion=L"1.0.0";ModDescription=L"Y toggles first and third person";ModAuthors=L"SessionFPP";
+    FirstPerson(){ModName=L"SessionFPP";ModVersion=L"0.2.0";ModDescription=L"G toggles first and third person";ModAuthors=L"SessionFPP";
         wchar_t exe[32768]{};GetModuleFileNameW(nullptr,exe,32768);auto root=std::filesystem::path(exe).parent_path();logfile=_wfsopen((root/L"SessionFPP.log").c_str(),L"w",_SH_DENYNO);
-        auto ini=root/L"SessionFPP.ini";
-        auto read=[&](const wchar_t* name,float value,float low,float high){wchar_t buffer[64]{};auto def=std::to_wstring(value);GetPrivateProfileStringW(L"Camera",name,def.c_str(),buffer,64,ini.c_str());float n=static_cast<float>(_wtof(buffer));return std::isfinite(n)&&n>=low&&n<=high?n:value;};
-        fov=read(L"FOV",110,60,140);eyeForward=read(L"EyeForwardCm",18,0,40);eyeUp=read(L"EyeUpCm",0,-30,30);pitchOffset=read(L"PitchDegrees",-10,-60,40);
+        initializeSettings((root/L"SessionFPP.ini").c_str());
     }
+    void on_update() override {registerSettingsMenu();}
     void on_unreal_init() override {
         hook=scan("40 55 57 48 8D AC 24 18 FC FF FF 48 81 EC E8 04 00 00 44 0F 29 8C 24 80 04 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 60 03 00 00");
         setTransform=reinterpret_cast<SetTransform>(scan("4C 8B DC 53 55 56 57 41 56 48 81 EC C0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 80 00 00 00"));
@@ -105,7 +105,7 @@ public:
         auto status=MH_Initialize();if(status!=MH_OK&&status!=MH_ERROR_ALREADY_INITIALIZED){log("MinHook initialization failed");hook=nullptr;return;}
         if(MH_CreateHook(hook,reinterpret_cast<void*>(tick),reinterpret_cast<void**>(&original))!=MH_OK){log("Camera hook creation failed");hook=nullptr;return;}
         if(MH_EnableHook(hook)!=MH_OK){MH_RemoveHook(hook);hook=nullptr;log("Camera hook enable failed");return;}
-        log("SessionFPP 1.0.0 ready. Press Y in gameplay. Default: third person.");
+        log("SessionFPP 0.2.0 ready. Press G in gameplay. Default: third person.");
     }
     ~FirstPerson() override {if(hook){MH_DisableHook(hook);MH_RemoveHook(hook);}if(logfile){fclose(logfile);logfile=nullptr;}}
 };
